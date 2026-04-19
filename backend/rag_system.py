@@ -6,7 +6,7 @@ from ai_generator import AIGenerator
 from gemini_generator import GeminiAIGenerator
 from base_generator import BaseAIGenerator
 from session_manager import SessionManager
-from search_tools import ToolManager, CourseSearchTool
+from search_tools import ToolManager, CourseSearchTool, CourseOutlineTool
 from models import Course, Lesson, CourseChunk
 
 class RAGSystem:
@@ -25,6 +25,8 @@ class RAGSystem:
         self.tool_manager = ToolManager()
         self.search_tool = CourseSearchTool(self.vector_store)
         self.tool_manager.register_tool(self.search_tool)
+        self.outline_tool = CourseOutlineTool(self.vector_store)
+        self.tool_manager.register_tool(self.outline_tool)
 
     def _create_generator(self, provider: str) -> BaseAIGenerator:
         if provider == "gemini":
