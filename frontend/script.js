@@ -5,7 +5,7 @@ const API_URL = '/api';
 let currentSessionId = null;
 
 // DOM elements
-let chatMessages, chatInput, sendButton, totalCourses, courseTitles;
+let chatMessages, chatInput, sendButton, courseTitles;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
@@ -13,7 +13,6 @@ document.addEventListener('DOMContentLoaded', () => {
   chatMessages = document.getElementById('chatMessages');
   chatInput = document.getElementById('chatInput');
   sendButton = document.getElementById('sendButton');
-  totalCourses = document.getElementById('totalCourses');
   courseTitles = document.getElementById('courseTitles');
 
   initTheme();
@@ -201,11 +200,6 @@ async function loadCourseStats() {
     const data = await response.json();
     console.log('Course data received:', data);
 
-    // Update stats in UI
-    if (totalCourses) {
-      totalCourses.textContent = data.total_courses;
-    }
-
     // Update course titles
     if (courseTitles) {
       if (data.course_titles && data.course_titles.length > 0) {
@@ -218,10 +212,6 @@ async function loadCourseStats() {
     }
   } catch (error) {
     console.error('Error loading course stats:', error);
-    // Set default values on error
-    if (totalCourses) {
-      totalCourses.textContent = '0';
-    }
     if (courseTitles) {
       courseTitles.innerHTML = '<span class="error">Failed to load courses</span>';
     }
