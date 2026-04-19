@@ -125,7 +125,11 @@ function addMessage(content, type, sources = null, isWelcome = false) {
         html += `
             <details class="sources-collapsible">
                 <summary class="sources-header">Sources</summary>
-                <div class="sources-content">${sources.join(', ')}</div>
+                <div class="sources-content">${sources.map(s =>
+                    s.url
+                        ? `<a href="${s.url}" target="_blank" rel="noopener">${s.label}</a>`
+                        : s.label
+                ).join(', ')}</div>
             </details>
         `;
     }
