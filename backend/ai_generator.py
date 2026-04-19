@@ -1,7 +1,9 @@
 import anthropic
 from typing import List, Optional, Dict, Any
 
-class AIGenerator:
+from base_generator import BaseAIGenerator
+
+class AIGenerator(BaseAIGenerator):
     """Handles interactions with Anthropic's Claude API for generating responses"""
     
     # Static system prompt to avoid rebuilding on each call

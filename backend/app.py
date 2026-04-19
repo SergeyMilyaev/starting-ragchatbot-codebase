@@ -7,7 +7,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+import logging
 import os
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 from config import config
 from rag_system import RAGSystem
@@ -32,7 +36,8 @@ app.add_middleware(
 )
 
 # Initialize RAG system
-rag_system = RAGSystem(config)
+provider = os.environ.get("AI_PROVIDER", "anthropic")
+rag_system = RAGSystem(config, provider=provider)
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -71,6 +76,7 @@ async def query_documents(request: QueryRequest):
             session_id=session_id
         )
     except Exception as e:
+        logger.exception("Error processing query")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/courses", response_model=CourseStats)
@@ -83,6 +89,7 @@ async def get_course_stats():
             course_titles=analytics["course_titles"]
         )
     except Exception as e:
+        logger.exception("Error fetching course stats")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")

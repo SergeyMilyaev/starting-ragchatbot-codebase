@@ -3,26 +3,37 @@ import os
 from document_processor import DocumentProcessor
 from vector_store import VectorStore
 from ai_generator import AIGenerator
+from gemini_generator import GeminiAIGenerator
+from base_generator import BaseAIGenerator
 from session_manager import SessionManager
 from search_tools import ToolManager, CourseSearchTool
 from models import Course, Lesson, CourseChunk
 
 class RAGSystem:
     """Main orchestrator for the Retrieval-Augmented Generation system"""
-    
-    def __init__(self, config):
+
+    def __init__(self, config, provider: str = "anthropic"):
         self.config = config
-        
+
         # Initialize core components
         self.document_processor = DocumentProcessor(config.CHUNK_SIZE, config.CHUNK_OVERLAP)
         self.vector_store = VectorStore(config.CHROMA_PATH, config.EMBEDDING_MODEL, config.MAX_RESULTS)
-        self.ai_generator = AIGenerator(config.ANTHROPIC_API_KEY, config.ANTHROPIC_MODEL)
+        self.ai_generator: BaseAIGenerator = self._create_generator(provider)
         self.session_manager = SessionManager(config.MAX_HISTORY)
-        
+
         # Initialize search tools
         self.tool_manager = ToolManager()
         self.search_tool = CourseSearchTool(self.vector_store)
         self.tool_manager.register_tool(self.search_tool)
+
+    def _create_generator(self, provider: str) -> BaseAIGenerator:
+        if provider == "gemini":
+            if not self.config.GOOGLE_API_KEY:
+                raise ValueError("GOOGLE_API_KEY is not set in .env")
+            return GeminiAIGenerator(self.config.GOOGLE_API_KEY, self.config.GEMINI_MODEL)
+        if not self.config.ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY is not set in .env")
+        return AIGenerator(self.config.ANTHROPIC_API_KEY, self.config.ANTHROPIC_MODEL)
     
     def add_course_document(self, file_path: str) -> Tuple[Course, int]:
         """

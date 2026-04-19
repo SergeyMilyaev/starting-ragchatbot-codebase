@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Create necessary directories
-mkdir -p docs 
+mkdir -p docs
 
-# Check if backend directory exists
 if [ ! -d "backend" ]; then
     echo "Error: backend directory not found"
     exit 1
 fi
 
-echo "Starting Course Materials RAG System..."
-echo "Make sure you have set your ANTHROPIC_API_KEY in .env"
+PROVIDER="${1:-anthropic}"
 
-# Change to backend directory and start the server
-cd backend && uv run uvicorn app:app --reload --port 8000
+echo "Starting Course Materials RAG System..."
+echo "Provider: $PROVIDER"
+echo "Make sure you have set your API key in .env (ANTHROPIC_API_KEY or GOOGLE_API_KEY)"
+
+uv run python main.py --provider "$PROVIDER" --reload
