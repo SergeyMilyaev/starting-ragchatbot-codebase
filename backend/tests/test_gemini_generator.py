@@ -109,13 +109,19 @@ def test_model_name_passed_to_generate_content(generator, mock_genai):
     assert call_kwargs["model"] == "gemini-test-model"
 
 
-def test_query_passed_as_contents(generator, mock_genai):
+def test_query_wrapped_in_contents_list(generator, mock_genai, mock_types):
     mock_genai.Client.return_value.models.generate_content.return_value = (
         make_text_response("answer")
     )
     generator.generate_response("What is Python?")
     call_kwargs = mock_genai.Client.return_value.models.generate_content.call_args.kwargs
-    assert call_kwargs["contents"] == "What is Python?"
+    # contents is now a list of Content objects, not a plain string
+    assert isinstance(call_kwargs["contents"], list)
+    assert len(call_kwargs["contents"]) == 1
+    # Verify Part and Content were constructed with the query text
+    mock_types.Part.assert_any_call(text="What is Python?")
+    first_content_call = mock_types.Content.call_args_list[0]
+    assert first_content_call.kwargs["role"] == "user"
 
 
 def test_system_prompt_in_config(generator, mock_genai, mock_types):
@@ -225,8 +231,8 @@ def test_tool_result_sent_as_function_response(generator, mock_genai, mock_types
     )
 
 
-def test_second_generate_content_call_has_no_tools(generator, mock_genai, mock_types):
-    """The follow-up call after tool execution must NOT include tools."""
+def test_follow_up_call_includes_tools(generator, mock_genai, mock_types):
+    """The follow-up call after tool execution must still include tools for potential chaining."""
     mock_client = mock_genai.Client.return_value
     mock_client.models.generate_content.side_effect = [
         make_tool_response("search_course_content", {"query": "MCP"}),
@@ -237,10 +243,9 @@ def test_second_generate_content_call_has_no_tools(generator, mock_genai, mock_t
 
     generator.generate_response("query", tools=[SEARCH_TOOL_DEF], tool_manager=mock_manager)
 
-    # The second GenerateContentConfig call should not include tools
     second_cfg_call = mock_types.GenerateContentConfig.call_args_list[1].kwargs
-    assert "tools" not in second_cfg_call, (
-        "Follow-up Gemini call must not include tools to avoid infinite function-call loops"
+    assert "tools" in second_cfg_call, (
+        "Follow-up Gemini call must include tools so the model can make a second tool call"
     )
 
 
@@ -306,6 +311,125 @@ def test_multiple_function_calls_all_executed(generator, mock_genai, mock_types)
     assert mock_manager.execute_tool.call_count == 2
 
 
+# ── two-round sequential tool calling ─────────────────────────────────────
+
+def test_two_round_happy_path(generator, mock_genai, mock_types):
+    """Two tool rounds followed by a text response: 3 API calls, 2 tool executions."""
+    mock_client = mock_genai.Client.return_value
+    mock_client.models.generate_content.side_effect = [
+        make_tool_response("search_course_content", {"query": "MCP"}),
+        make_tool_response("get_course_outline", {"course_title": "MCP Course"}),
+        make_text_response("Final answer"),
+    ]
+    mock_manager = MagicMock()
+    mock_manager.execute_tool.return_value = "some result"
+
+    result = generator.generate_response(
+        "query", tools=[SEARCH_TOOL_DEF, OUTLINE_TOOL_DEF], tool_manager=mock_manager
+    )
+
+    assert mock_client.models.generate_content.call_count == 3
+    assert mock_manager.execute_tool.call_count == 2
+    assert result == "Final answer"
+
+
+def test_hard_cap_at_two_tool_rounds(generator, mock_genai, mock_types):
+    """Even if model keeps requesting tools, execute_tool is called at most 2 times."""
+    mock_client = mock_genai.Client.return_value
+    mock_client.models.generate_content.side_effect = [
+        make_tool_response("search_course_content", {"query": "A"}),
+        make_tool_response("search_course_content", {"query": "B"}),
+        make_tool_response("search_course_content", {"query": "C"}),
+        make_text_response("Synthesized"),
+    ]
+    mock_manager = MagicMock()
+    mock_manager.execute_tool.return_value = "result"
+
+    result = generator.generate_response(
+        "query", tools=[SEARCH_TOOL_DEF], tool_manager=mock_manager
+    )
+
+    assert mock_manager.execute_tool.call_count == 2
+    assert mock_client.models.generate_content.call_count <= 4
+    assert isinstance(result, str)
+
+
+def test_early_exit_after_one_round(generator, mock_genai, mock_types):
+    """If round 2 returns text, stop — do not enter a third round."""
+    mock_client = mock_genai.Client.return_value
+    mock_client.models.generate_content.side_effect = [
+        make_tool_response("search_course_content", {"query": "MCP"}),
+        make_text_response("Done after one tool round"),
+    ]
+    mock_manager = MagicMock()
+    mock_manager.execute_tool.return_value = "result"
+
+    result = generator.generate_response(
+        "query", tools=[SEARCH_TOOL_DEF], tool_manager=mock_manager
+    )
+
+    assert mock_client.models.generate_content.call_count == 2
+    assert mock_manager.execute_tool.call_count == 1
+    assert result == "Done after one tool round"
+
+
+def test_contents_list_grows_across_two_rounds(generator, mock_genai, mock_types):
+    """After 2 tool rounds the third call must receive 5 content turns."""
+    mock_client = mock_genai.Client.return_value
+    mock_client.models.generate_content.side_effect = [
+        make_tool_response("search_course_content", {"query": "A"}),
+        make_tool_response("get_course_outline", {"course_title": "X"}),
+        make_text_response("Final"),
+    ]
+    mock_manager = MagicMock()
+    mock_manager.execute_tool.return_value = "result"
+
+    generator.generate_response(
+        "What is MCP?", tools=[SEARCH_TOOL_DEF, OUTLINE_TOOL_DEF], tool_manager=mock_manager
+    )
+
+    third_call_kwargs = mock_client.models.generate_content.call_args_list[2].kwargs
+    contents = third_call_kwargs["contents"]
+    assert isinstance(contents, list)
+    assert len(contents) == 5  # user, model_1, tool_result_1, model_2, tool_result_2
+
+
+def test_tool_error_does_not_raise(generator, mock_genai, mock_types):
+    """A tool execution exception must be caught; generate_response must return a string."""
+    mock_client = mock_genai.Client.return_value
+    mock_client.models.generate_content.side_effect = [
+        make_tool_response("search_course_content", {"query": "MCP"}),
+        make_text_response("Handled gracefully"),
+    ]
+    mock_manager = MagicMock()
+    mock_manager.execute_tool.side_effect = Exception("DB unavailable")
+
+    result = generator.generate_response(
+        "query", tools=[SEARCH_TOOL_DEF], tool_manager=mock_manager
+    )
+
+    assert isinstance(result, str)
+    assert mock_client.models.generate_content.call_count >= 2
+
+
+def test_tool_error_passed_as_function_response(generator, mock_genai, mock_types):
+    """On tool failure, a FunctionResponse must still be built with an error string."""
+    mock_client = mock_genai.Client.return_value
+    mock_client.models.generate_content.side_effect = [
+        make_tool_response("search_course_content", {"query": "MCP"}),
+        make_text_response("answer"),
+    ]
+    mock_manager = MagicMock()
+    mock_manager.execute_tool.side_effect = Exception("timeout")
+
+    generator.generate_response("query", tools=[SEARCH_TOOL_DEF], tool_manager=mock_manager)
+
+    fr_call = mock_types.FunctionResponse.call_args
+    assert fr_call is not None
+    response_content = fr_call.kwargs["response"]["result"]
+    assert "Tool execution failed" in response_content
+
+
 # ── system prompt completeness ─────────────────────────────────────────────
 
 def test_gemini_system_prompt_includes_outline_guidance():
@@ -323,3 +447,12 @@ def test_anthropic_and_gemini_prompts_both_mention_outline():
     from gemini_generator import GeminiAIGenerator
     assert "get_course_outline" in AIGenerator.SYSTEM_PROMPT
     assert "get_course_outline" in GeminiAIGenerator.SYSTEM_PROMPT
+
+
+def test_system_prompts_allow_sequential_tool_calls():
+    """Both prompts must remove the one-search limit and allow two sequential calls."""
+    from ai_generator import AIGenerator
+    from gemini_generator import GeminiAIGenerator
+    for cls in (AIGenerator, GeminiAIGenerator):
+        assert "One search per query maximum" not in cls.SYSTEM_PROMPT
+        assert "two sequential tool calls" in cls.SYSTEM_PROMPT

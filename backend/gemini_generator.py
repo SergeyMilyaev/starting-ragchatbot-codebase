@@ -12,7 +12,8 @@ class GeminiAIGenerator(BaseAIGenerator):
 
 Search Tool Usage:
 - Use the search tool **only** for questions about specific course content or detailed educational materials
-- **One search per query maximum**
+- You may perform up to **two sequential tool calls** when the first result reveals additional information is needed
+- Chain tools only when necessary (e.g. get course outline to identify a lesson, then search for related content)
 - Synthesize search results into accurate, fact-based responses
 - If search yields no results, state this clearly without offering alternatives
 
@@ -53,27 +54,71 @@ Provide only the direct answer to what was asked.
             else self.SYSTEM_PROMPT
         )
 
-        config_kwargs: Dict[str, Any] = {
+        gemini_tools = self._convert_tools(tools) if tools else None
+        base_config_kwargs: Dict[str, Any] = {
             "system_instruction": system_content,
             "temperature": 0,
             "max_output_tokens": 800,
         }
-        if tools:
-            config_kwargs["tools"] = self._convert_tools(tools)
+        if gemini_tools:
+            base_config_kwargs["tools"] = gemini_tools
+
+        contents: List = [types.Content(role="user", parts=[types.Part(text=query)])]
 
         response = self.client.models.generate_content(
             model=self.model,
-            contents=query,
-            config=types.GenerateContentConfig(**config_kwargs),
+            contents=contents,
+            config=types.GenerateContentConfig(**base_config_kwargs),
         )
 
-        part = response.candidates[0].content.parts[0]
-        if hasattr(part, "function_call") and part.function_call and tool_manager:
-            return self._handle_tool_execution(
-                response, query, system_content, config_kwargs.get("tools"), tool_manager
+        for _ in range(2):
+            parts = response.candidates[0].content.parts
+            has_function_call = any(
+                hasattr(p, "function_call") and p.function_call for p in parts
+            )
+            if not has_function_call or not tool_manager:
+                return response.text
+
+            contents.append(types.Content(role="model", parts=parts))
+
+            result_parts = []
+            for part in parts:
+                if hasattr(part, "function_call") and part.function_call:
+                    fc = part.function_call
+                    try:
+                        tool_result = tool_manager.execute_tool(fc.name, **dict(fc.args))
+                    except Exception as e:
+                        tool_result = f"Tool execution failed: {e}"
+                    result_parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                name=fc.name,
+                                response={"result": tool_result},
+                            )
+                        )
+                    )
+
+            contents.append(types.Content(role="user", parts=result_parts))
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(**base_config_kwargs),
             )
 
-        return response.text
+        # Check if last follow-up response is already text (no more tool calls needed)
+        parts = response.candidates[0].content.parts
+        if not any(hasattr(p, "function_call") and p.function_call for p in parts):
+            return response.text
+
+        # Rounds exhausted but model still wants tools — force final synthesis without tools
+        final_config = {k: v for k, v in base_config_kwargs.items() if k != "tools"}
+        final_response = self.client.models.generate_content(
+            model=self.model,
+            contents=contents,
+            config=types.GenerateContentConfig(**final_config),
+        )
+        return final_response.text
 
     def _convert_tools(self, anthropic_tools: List[Dict]) -> List[types.Tool]:
         """Convert Anthropic-format tool dicts to Gemini Tool objects.
@@ -91,45 +136,3 @@ Provide only the direct answer to what was asked.
                 )
             )
         return [types.Tool(function_declarations=declarations)]
-
-    def _handle_tool_execution(
-        self,
-        initial_response,
-        original_query: str,
-        system_content: str,
-        gemini_tools,
-        tool_manager,
-    ) -> str:
-        user_turn = types.Content(role="user", parts=[types.Part(text=original_query)])
-        model_turn = types.Content(
-            role="model",
-            parts=initial_response.candidates[0].content.parts,
-        )
-
-        result_parts = []
-        for part in initial_response.candidates[0].content.parts:
-            if hasattr(part, "function_call") and part.function_call:
-                fc = part.function_call
-                tool_result = tool_manager.execute_tool(fc.name, **dict(fc.args))
-                result_parts.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=fc.name,
-                            response={"result": tool_result},
-                        )
-                    )
-                )
-
-        tool_turn = types.Content(role="user", parts=result_parts)
-
-        final_response = self.client.models.generate_content(
-            model=self.model,
-            contents=[user_turn, model_turn, tool_turn],
-            config=types.GenerateContentConfig(
-                system_instruction=system_content,
-                temperature=0,
-                max_output_tokens=800,
-            ),
-        )
-
-        return final_response.text
